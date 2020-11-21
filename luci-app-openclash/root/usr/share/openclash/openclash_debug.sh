@@ -1,14 +1,13 @@
 #!/bin/bash
 . /lib/functions.sh
 . /usr/share/openclash/openclash_ps.sh
+. /usr/share/openclash/ruby.sh
 
 status=$(unify_ps_status "openclash_debug.sh")
 [ "$status" -gt "3" ] && exit 0
 
 DEBUG_LOG="/tmp/openclash_debug.log"
 LOGTIME=$(date "+%Y-%m-%d %H:%M:%S")
-CHANGE_FILE="/tmp/yaml_change.yaml"
-DNS_FILE="/tmp/yaml_dns.yaml"
 uci commit openclash
 
 enable_custom_dns=$(uci get openclash.config.enable_custom_dns 2>/dev/null)
@@ -22,7 +21,8 @@ intranet_allowed=$(uci get openclash.config.intranet_allowed 2>/dev/null)
 enable_udp_proxy=$(uci get openclash.config.enable_udp_proxy 2>/dev/null)
 enable_rule_proxy=$(uci get openclash.config.enable_rule_proxy 2>/dev/null)
 en_mode=$(uci get openclash.config.en_mode 2>/dev/null)
-CONFIG_FILE=$(uci get openclash.config.config_path 2>/dev/null)
+RAW_CONFIG_FILE=$(uci get openclash.config.config_path 2>/dev/null)
+CONFIG_FILE="/etc/openclash/$(uci get openclash.config.config_path 2>/dev/null |awk -F '/' '{print $5}' 2>/dev/null)"
 core_type=$(uci get openclash.config.core_version 2>/dev/null)
 cpu_model=$(opkg status libc 2>/dev/null |grep 'Architecture' |awk -F ': ' '{print $2}' 2>/dev/null)
 core_version=$(/etc/openclash/core/clash -v 2>/dev/null |awk -F ' ' '{print $2}' 2>/dev/null)
@@ -32,10 +32,11 @@ servers_update=$(uci get openclash.config.servers_update 2>/dev/null)
 op_version=$(sed -n 1p /usr/share/openclash/res/openclash_version 2>/dev/null)
 china_ip_route=$(uci get openclash.config.china_ip_route 2>/dev/null)
 
-if [ -z "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
+if [ -z "$RAW_CONFIG_FILE" ] || [ ! -f "$RAW_CONFIG_FILE" ]; then
 	CONFIG_NAME=$(ls -lt /etc/openclash/config/ | grep -E '.yaml|.yml' | head -n 1 |awk '{print $9}')
 	if [ ! -z "$CONFIG_NAME" ]; then
-      CONFIG_FILE="/etc/openclash/config/$CONFIG_NAME"
+      RAW_CONFIG_FILE="/etc/openclash/config/$CONFIG_NAME"
+      CONFIG_FILE="/etc/openclash/$CONFIG_NAME"
   fi
 fi
 
@@ -62,6 +63,7 @@ cat >> "$DEBUG_LOG" <<-EOF
 
 生成时间: $LOGTIME
 插件版本: $op_version
+隐私提示: 上传此日志前请注意检查、屏蔽公网IP、节点、密码等相关敏感信息
 
 \`\`\`
 EOF
@@ -101,6 +103,8 @@ iptables-mod-tproxy: $(ts_re "$(opkg status iptables-mod-tproxy 2>/dev/null |gre
 iptables-mod-extra: $(ts_re "$(opkg status iptables-mod-extra 2>/dev/null |grep 'Status' |awk -F ': ' '{print $2}' 2>/dev/null)")
 libcap: $(ts_re "$(opkg status libcap 2>/dev/null |grep 'Status' |awk -F ': ' '{print $2}' 2>/dev/null)")
 libcap-bin: $(ts_re "$(opkg status libcap-bin 2>/dev/null |grep 'Status' |awk -F ': ' '{print $2}' 2>/dev/null)")
+ruby: $(ts_re "$(opkg status ruby 2>/dev/null |grep 'Status' |awk -F ': ' '{print $2}' 2>/dev/null)")
+ruby-yaml: $(ts_re "$(opkg status ruby-yaml 2>/dev/null |grep 'Status' |awk -F ': ' '{print $2}' 2>/dev/null)")
 kmod-tun(TUN模式): $(ts_re "$(opkg status kmod-tun 2>/dev/null |grep 'Status' |awk -F ': ' '{print $2}' 2>/dev/null)")
 luci-compat(Luci-19.07): $(ts_re "$(opkg status luci-compat 2>/dev/null |grep 'Status' |awk -F ': ' '{print $2}' 2>/dev/null)")
 EOF
@@ -113,6 +117,9 @@ EOF
 if pidof clash >/dev/null; then
 cat >> "$DEBUG_LOG" <<-EOF
 运行状态: 运行中
+进程pid: $(pidof clash)
+运行权限: `getpcaps $(pidof clash)`
+运行用户: $(ps |grep "/etc/openclash/clash" |grep -v grep |awk '{print $2}' 2>/dev/null)
 EOF
 else
 cat >> "$DEBUG_LOG" <<-EOF
@@ -200,7 +207,8 @@ fi
 cat >> "$DEBUG_LOG" <<-EOF
 
 #===================== 插件设置 =====================#
-当前配置文件: $CONFIG_FILE
+当前配置文件: $RAW_CONFIG_FILE
+启动配置文件: $CONFIG_FILE
 运行模式: $en_mode
 默认代理模式: $proxy_mode
 UDP流量转发: $(ts_cf "$enable_udp_proxy")
@@ -266,23 +274,14 @@ fi
 cat >> "$DEBUG_LOG" <<-EOF
 
 #===================== 配置文件 =====================#
+
 EOF
-if [ -n "$(grep OpenClash-General-Settings "$CONFIG_FILE")" ]; then
-   sed '/OpenClash-General-Settings/,$d' "$CONFIG_FILE" >> "$DEBUG_LOG" 2>/dev/null
+if [ -f "$CONFIG_FILE" ]; then
+   ruby_read "YAML.load_file('$CONFIG_FILE')" ".select {|x| 'proxies' != x and 'proxy-providers' != x }.to_yaml" 2>/dev/null >> "$DEBUG_LOG"
 else
-   /usr/share/openclash/yml_field_name_ch.sh "$CONFIG_FILE" 2>/dev/null
-   #取出general部分
-   /usr/share/openclash/yml_field_cut.sh "general" "$CHANGE_FILE" "$CONFIG_FILE"
-   
-   #取出dns部分
-   nameserver_len=$(sed -n '/^ \{0,\}nameserver:/=' "$CONFIG_FILE" 2>/dev/null)
-   if [ -n "$nameserver_len" ]; then
-      /usr/share/openclash/yml_field_cut.sh "$nameserver_len" "$DNS_FILE" "$CONFIG_FILE"
-   fi 2>/dev/null
-   
-   rm -rf /tmp/yaml_general 2>/dev/null
-   cat "$CHANGE_FILE" "$DNS_FILE" >> "$DEBUG_LOG"
+   ruby_read "YAML.load_file('$RAW_CONFIG_FILE')" ".select {|x| 'proxies' != x and 'proxy-providers' != x }.to_yaml" 2>/dev/null >> "$DEBUG_LOG"
 fi
+
 sed -i '/^ \{0,\}secret:/d' "$DEBUG_LOG" 2>/dev/null
 
 #firewall
@@ -293,16 +292,14 @@ cat >> "$DEBUG_LOG" <<-EOF
 #NAT chain
 
 EOF
-iptables -t nat -nL PREROUTING --line-number >> "$DEBUG_LOG"
-iptables -t nat -nL OUTPUT --line-number >> "$DEBUG_LOG"
+iptables-save -t nat >> "$DEBUG_LOG" 2>/dev/null
 
 cat >> "$DEBUG_LOG" <<-EOF
 
 #Mangle chain
 
 EOF
-iptables -t mangle -nL PREROUTING --line-number >> "$DEBUG_LOG"
-iptables -t mangle -nL OUTPUT --line-number >> "$DEBUG_LOG"
+iptables-save -t mangle >> "$DEBUG_LOG" 2>/dev/null
 
 cat >> "$DEBUG_LOG" <<-EOF
 
@@ -363,14 +360,9 @@ cat >> "$DEBUG_LOG" <<-EOF
 EOF
 VERSION_URL="https://raw.githubusercontent.com/vernesong/OpenClash/master/version"
 if pidof clash >/dev/null; then
-   HTTP_PORT=$(uci get openclash.config.http_port 2>/dev/null)
-   PROXY_ADDR=$(uci get network.lan.ipaddr 2>/dev/null |awk -F '/' '{print $1}' 2>/dev/null)
-   if [ -s "/tmp/openclash.auth" ]; then
-      PROXY_AUTH=$(cat /tmp/openclash.auth |awk -F '- ' '{print $2}' |sed -n '1p' 2>/dev/null)
-   fi
-   curl -IL -m 3 --retry 2 -x http://$PROXY_ADDR:$HTTP_PORT -U "$PROXY_AUTH" "$VERSION_URL" >> "$DEBUG_LOG"
+   curl -IL -m 3 --retry 2 "$VERSION_URL" >> "$DEBUG_LOG" 2>/dev/null
 else
-   curl -IL -m 3 --retry 2 "$VERSION_URL" >> "$DEBUG_LOG"
+   curl -IL -m 3 --retry 2 "$VERSION_URL" >> "$DEBUG_LOG" 2>/dev/null
 fi
 
 cat >> "$DEBUG_LOG" <<-EOF
